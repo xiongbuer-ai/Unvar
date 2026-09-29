@@ -1,0 +1,47 @@
+name: Build unsigned installers
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: mac:arm64
+            artifact: mac-arm64
+          - os: macos-15-intel
+            target: mac:x64
+            artifact: mac-x64
+          - os: windows-2025
+            target: win:x64
+            artifact: win-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.12.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm package:${{ matrix.target }}
+      - run: node scripts/checksums.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unvar-${{ matrix.artifact }}-unsigned
+          path: |
+            dist/installers/*.dmg
+            dist/installers/*.exe
+            dist/installers/SHA256SUMS.txt
+          if-no-files-found: error

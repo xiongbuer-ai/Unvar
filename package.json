@@ -1,0 +1,42 @@
+{
+  "name": "unvar",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "packageManager": "pnpm@11.0.9",
+  "engines": {
+    "node": ">=24.12.0 <25",
+    "pnpm": "11.0.9"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @unvar/desktop dev",
+    "build": "pnpm --filter @unvar/desktop build",
+    "start": "pnpm --filter @unvar/desktop start",
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "pnpm -r typecheck && tsc -p tests/tsconfig.json",
+    "test": "vitest run && pnpm test:db",
+    "test:smoke": "node tests/desktop-smoke.mjs",
+    "test:workspace": "node tests/workspace-smoke.mjs",
+    "native:rebuild": "electron-rebuild -m apps/desktop -w better-sqlite3",
+    "postinstall": "pnpm native:rebuild",
+    "test:db": "node tests/run-db-tests.mjs",
+    "package:mac:arm64": "pnpm build && electron-builder --config electron-builder.yml --mac --arm64 --publish never",
+    "package:mac:x64": "pnpm build && electron-builder --config electron-builder.yml --mac --x64 --publish never",
+    "package:win:x64": "pnpm build && electron-builder --config electron-builder.yml --win --x64 --publish never",
+    "package:dir": "pnpm build && electron-builder --config electron-builder.yml --dir --publish never"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "4.2.0",
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.19.0",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
+    "eslint": "10.11.0",
+    "playwright-core": "1.63.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.0",
+    "vite": "7.3.6",
+    "vitest": "5.0.2"
+  }
+}

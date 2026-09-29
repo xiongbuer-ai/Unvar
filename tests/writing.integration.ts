@@ -1,0 +1,94 @@
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import type { Store } from '../packages/db/src/index';
+import { WritingWorkflow } from '../packages/workflows/src/writing';
+import type { LLMProvider } from '../packages/llm/src/index';
+import type { WritingStage } from '../packages/shared/src/writing';
+
+export async function verifyWriting(store: Store) {
+  let finding = store.findings.list().find(item => item.status === 'candidate')!;
+  finding = store.findings.review({ id: finding.id, revision: finding.revision, action: 'accept', reason: 'Synthetic Golden Path test: checked the experiment.' });
+  const config = store.saveProvider({ providerType: 'openai-compatible', displayName: 'Writing mock', baseUrl: 'https://example.com/v1', model: 'mock:writing', enabled: true });
+  const create = { title: 'Synthetic research article', source: { kind: 'finding' as const, id: finding.id }, operationId: randomUUID() };
+  let article = store.writing.create(create);
+  assert.equal(store.writing.create(create).id, article.id);
+  assert.throws(() => store.writing.create({ ...create, title: 'Conflicting retry' }));
+  const request = (stage: WritingStage) => ({ articleId: article.id, providerId: config.id, stage, operationId: randomUUID() });
+  assert.throws(() => store.writing.start(request('draft')), /Confirm/);
+  assert.throws(() => store.writing.buildPack(article), /Unrecognized|unrecognized/);
+  assert.throws(() => store.writing.buildPack({ id: article.id, revision: article.revision }), /interview/);
+  article = store.writing.saveInterview({ id: article.id, revision: article.revision, title: article.title, answers: { observations: 'Synthetic observed rollback.', opinions: 'This is useful for local tools.', experience: 'Synthetic interview answer from the test author.', unknowns: 'Other platforms remain unverified.' } });
+  article = store.writing.buildPack({ id: article.id, revision: article.revision });
+  assert.deepEqual(article.factPack!.userExperiences, ['Synthetic interview answer from the test author.']);
+  assert.throws(() => store.writing.start(request('outline')), /Confirm/);
+  const confirmation = { id: article.id, revision: article.revision, version: article.factPack!.version };
+  store.db.exec("CREATE TEMP TRIGGER writing_fail_decision BEFORE INSERT ON decisions BEGIN SELECT RAISE(ABORT,'injected'); END;");
+  assert.throws(() => store.writing.confirm(confirmation));
+  assert.equal(store.writing.get(article.id).confirmationValid, false);
+  store.db.exec('DROP TRIGGER writing_fail_decision');
+  article = store.writing.confirm(confirmation); assert.ok(article.confirmationValid);
+  assert.equal(store.writing.confirm(confirmation).revision, article.revision);
+  assert.throws(() => store.writing.start(request('draft')), /outline/);
+  assert.throws(() => store.writing.ready({ id: article.id, revision: article.revision, reason: 'Too early.' }), /Review/);
+  let calls = 0;
+  const provider: LLMProvider = { id: config.id, name: 'mock:writing', generateText: async () => ({ text: '', model: 'mock:writing' }), generateStructured: async ({ schema, prompt }) => {
+    calls++;
+    const { stage } = JSON.parse(prompt) as { stage: WritingStage };
+    return schema.parse(stage === 'review' ? { summary: 'Limited local evidence.', issues: ['Avoid generalization.'] } : { markdown: stage === 'outline' ? '## Observation\n## Limitations' : 'A local transaction rolled back. Only one local version was tested.', evidenceIds: [finding.id] });
+  } };
+  const workflow = new WritingWorkflow(store, 'test');
+  const outline = request('outline'); const run = workflow.start(outline, provider);
+  assert.equal(workflow.start(outline, provider).id, run.id);
+  await workflow.waitForIdle(); assert.equal(store.writing.run(run.id).status, 'completed'); assert.equal(calls, 1);
+  workflow.start(outline, provider); assert.equal(calls, 1);
+  assert.throws(() => workflow.start({ ...outline, stage: 'draft' }, provider), /conflicts/);
+  const draft = workflow.start(request('draft'), provider); await workflow.waitForIdle(); assert.equal(store.writing.run(draft.id).status, 'completed');
+  article = store.writing.get(article.id); const generatedDraft = article.draftMd;
+  article = store.writing.edit({ id: article.id, revision: article.revision, part: 'draft', markdown: generatedDraft + '\nThe test does not establish portability.', reason: 'Add scope caveat.' });
+  assert.equal(article.draftMd, generatedDraft); assert.equal(article.status, 'edit');
+  workflow.start(request('review'), provider); await workflow.waitForIdle(); article = store.writing.get(article.id);
+  assert.ok(article.reviewCurrent); assert.throws(() => store.writing.markdown(article.id), /human review/);
+  store.db.exec("CREATE TEMP TRIGGER writing_ready_rollback BEFORE INSERT ON decisions BEGIN SELECT RAISE(ABORT,'injected'); END;");
+  assert.throws(() => store.writing.ready({ id: article.id, revision: article.revision, reason: 'Checked caveats.' }));
+  assert.equal(store.writing.get(article.id).status, 'review');
+  store.db.exec('DROP TRIGGER writing_ready_rollback');
+  article = store.writing.ready({ id: article.id, revision: article.revision, reason: 'The caveat addresses the review issue.' });
+  assert.match(store.writing.markdown(article.id), /Fact Pack version: 1/);
+  assert.match(store.writing.markdown(article.id), /Evidence/);
+  // Late model results cannot overwrite a human edit.
+  const stale = store.writing.start(request('review'));
+  article = store.writing.edit({ id: article.id, revision: article.revision, part: 'draft', markdown: article.finalMd + '\nHuman addition.', reason: 'Explicit edit.' });
+  assert.equal(article.reviewCurrent, false); assert.equal(article.readyAt, null);
+  assert.throws(() => store.writing.complete(stale.id, { summary: 'stale', issues: [] }, []), /changed/);
+  store.writing.finish(stale.id, 'failed', 'Stale test response', []);
+  assert.throws(() => store.writing.markdown(article.id));
+  const before = article.outlineMd;
+  const bad = workflow.start(request('outline'), { ...provider, generateStructured: async () => ({ markdown: 'Forged', evidenceIds: ['01ARZ3NDEKTSV4RRFFQ69G5FAV'] }) as never });
+  await workflow.waitForIdle(); assert.equal(store.writing.run(bad.id).status, 'failed'); assert.equal(store.writing.get(article.id).outlineMd, before);
+  const canceled = workflow.start(request('outline'), provider); workflow.cancel(canceled.id); await workflow.waitForIdle(); assert.equal(store.writing.run(canceled.id).status, 'canceled');
+  const slow = new WritingWorkflow(store, '', 5); const timeout = slow.start(request('outline'), { ...provider, generateStructured: () => new Promise(() => {}) });
+  await slow.waitForIdle(); assert.match(store.writing.run(timeout.id).error!, /timed out/);
+  store.db.exec("CREATE TEMP TRIGGER writing_generation_rollback BEFORE INSERT ON decisions BEGIN SELECT RAISE(ABORT,'injected'); END;");
+  const failure = workflow.start(request('outline'), provider); await workflow.waitForIdle(); assert.equal(store.writing.run(failure.id).status, 'failed'); assert.equal(store.writing.get(article.id).revision, article.revision);
+  store.db.exec('DROP TRIGGER writing_generation_rollback');
+  // Interview changes revoke confirmation and force a new pack; old versions remain intact.
+  article = store.writing.saveInterview({ id: article.id, revision: article.revision, title: article.title, answers: { ...article.interview, opinions: 'A revised human opinion.' } });
+  assert.equal(article.confirmationValid, false);
+  assert.throws(() => store.writing.confirm({ id: article.id, revision: article.revision, version: 1 }), /Rebuild/);
+  assert.throws(() => workflow.start(request('draft'), provider));
+  article = store.writing.buildPack({ id: article.id, revision: article.revision }); assert.equal(article.factPack!.version, 2);
+  article = store.writing.confirm({ id: article.id, revision: article.revision, version: 2 });
+  assert.throws(() => workflow.start(request('draft'), provider), /outline/);
+  for (const stage of ['outline','draft','review'] as const) { const retry = workflow.start(request(stage), provider); await workflow.waitForIdle(); assert.equal(store.writing.run(retry.id).status, 'completed'); }
+  article = store.writing.get(article.id); article = store.writing.ready({ id: article.id, revision: article.revision, reason: 'Reviewed synthetic version two.' });
+  const readyId = article.id;
+  // An upstream finding change immediately invalidates export even without editing this article.
+  store.findings.edit({ id: finding.id, revision: finding.revision, text: finding.text + ' Revised.', confidence: finding.confidence, counterEvidence: finding.counterEvidence, evidence: finding.evidence, reason: 'Change upstream source.' });
+  assert.equal(store.writing.get(readyId).confirmationValid, false); assert.throws(() => store.writing.markdown(readyId), /Confirm/);
+  const recovered = store.writing.create({ title: 'Recovery fixture', source: { kind: 'experiment', id: finding.evidence[0].experimentId }, operationId: randomUUID() });
+  let other = store.writing.saveInterview({ id: recovered.id, revision: 0, title: recovered.title, answers: article.interview });
+  other = store.writing.buildPack({ id: other.id, revision: other.revision }); other = store.writing.confirm({ id: other.id, revision: other.revision, version: 1 });
+  const pending = store.writing.start({ ...request('outline'), articleId: other.id }); store.writing.recover(); assert.equal(store.writing.run(pending.id).status, 'failed');
+  console.log('Writing Golden Path passed: human interview, versioned confirmation, outline/draft/edit/review/Ready/export, evidence tracing, atomic decisions, stale response/source rejection, retry/cancel/timeout/recovery.');
+  return readyId;
+}

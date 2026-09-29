@@ -1,0 +1,18 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "**/*.test.ts",
+    "**/*.integration.ts",
+    "../vitest.config.ts",
+    "radar-live.ts",
+    "finding-live.ts",
+    "seed-desktop.ts",
+    "writing-live.ts",
+    "pi-live.ts"
+  ]
+}

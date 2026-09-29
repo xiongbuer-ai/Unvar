@@ -1,0 +1,21 @@
+{
+  "name": "@unvar/fetcher",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@mozilla/readability": "0.6.0",
+    "jsdom": "30.1.1",
+    "ipaddr.js": "2.5.0"
+  },
+  "devDependencies": {
+    "@types/jsdom": "30.0.0"
+  }
+}

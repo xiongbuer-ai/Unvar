@@ -1,0 +1,38 @@
+appId: org.unvar.desktop
+productName: Unvar
+electronVersion: 44.4.5
+copyright: Copyright © Unvar contributors
+asar: true
+npmRebuild: true
+nativeRebuilder: sequential
+publish: null
+forceCodeSigning: false
+directories:
+  app: apps/desktop
+  output: dist/installers
+files:
+  - out/**/*
+  - package.json
+  - '!**/*.map'
+asarUnpack:
+  - '**/*.node'
+extraResources:
+  - from: LICENSE
+    to: LICENSE
+mac:
+  target: dmg
+  category: public.app-category.productivity
+  icon: apps/desktop/src/main/assets/app-icon.icns
+  identity: null
+  artifactName: 'Unvar-${version}-mac-${arch}.${ext}'
+dmg:
+  sign: false
+win:
+  target: nsis
+  icon: apps/desktop/src/main/assets/app-icon.png
+  artifactName: 'Unvar-${version}-win-${arch}-setup.${ext}'
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false

@@ -1,0 +1,33 @@
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import type { Store } from '../packages/db/src/index';
+export function verifyDecisions(store: Store) {
+  const all = store.decisions.list({limit:100});
+  assert.ok(all.total > 0);
+  for (const type of ['question_score','finding_confirmation','article_review']) assert.ok(all.items.some(item=>item.type===type),type);
+  const score = all.items.find(item=>item.type==='question_score' && item.override)!;
+  assert.ok(score.reason); assert.ok(score.aiRecommendation); assert.ok(score.humanDecision);
+  const proposal = all.items.find(item=>item.type==='finding_proposal')!; assert.equal(proposal.humanDecision,null);
+  assert.ok(store.decisions.list({overridesOnly:true}).items.every(item=>item.override));
+  assert.equal(store.decisions.list({search:"' OR 1=1 --"}).total,0);
+  assert.equal(store.decisions.list({entityId:score.entityId,entityType:'question'}).items.every(item=>item.entityId===score.entityId),true);
+  const first = store.decisions.list({limit:2}); const second = store.decisions.list({limit:2,offset:2});
+  assert.equal(first.items.some(item=>second.items.some(other=>other.id===item.id)),false);
+  const before = store.decisions.get(score.id);
+  const request = {id:score.id,revision:0,text:'Observed fewer irrelevant questions in this synthetic test.',operationId:randomUUID()};
+  let saved = store.decisions.saveOutcome(request); assert.equal(saved.outcomeRevision,1); assert.equal(saved.outcomeHistory.length,1);
+  assert.equal(store.decisions.saveOutcome(request).outcomeRevision,1);
+  assert.throws(()=>store.decisions.saveOutcome({...request,text:'Conflicting retry'}),/conflicts/);
+  assert.throws(()=>store.decisions.saveOutcome({...request,operationId:randomUUID()}),/changed/);
+  store.db.exec("CREATE TEMP TRIGGER decision_outcome_rollback BEFORE UPDATE OF outcome_json ON decisions BEGIN SELECT RAISE(ABORT,'injected'); END;");
+  assert.throws(()=>store.decisions.saveOutcome({...request,revision:1,operationId:randomUUID(),text:'Rollback attempt'}));
+  assert.equal(store.decisions.get(score.id).outcomeHistory.length,1);
+  store.db.exec('DROP TRIGGER decision_outcome_rollback');
+  saved = store.decisions.saveOutcome({...request,revision:1,operationId:randomUUID(),text:'Follow-up found a limitation.'});
+  assert.equal(saved.outcomeHistory.length,2); assert.equal(saved.outcomeHistory[1].text,request.text);
+  assert.deepEqual(saved.aiRecommendation,before.aiRecommendation); assert.deepEqual(saved.humanDecision,before.humanDecision); assert.equal(saved.reason,before.reason);
+  assert.ok(store.decisions.list({search:'Follow-up found a limitation'}).items.some(item=>item.id===score.id));
+  assert.throws(()=>store.decisions.list({limit:10000}));
+  console.log('Decision history passed: score/Finding/article records, bounded filtering, entity timelines, immutable proposals, outcome revisions/idempotency, stale edits and atomic rollback.');
+  return score.id;
+}

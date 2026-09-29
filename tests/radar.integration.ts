@@ -1,0 +1,70 @@
+import assert from 'node:assert/strict';
+import type { Store } from '../packages/db/src/index';
+import { RadarWorkflow } from '../packages/workflows/src/index';
+import type { LLMProvider } from '../packages/llm/src/index';
+import type { SignalAnalysis } from '../packages/shared/src/radar';
+
+export async function verifyRadar(store: Store) {
+  const analysis: SignalAnalysis = { claims: [{ text: 'Transactions are atomic', type: 'claim', evidenceText: 'Transactions are atomic' }], questions: [{ claimIndex: 0, text: 'Does failure preserve data?', whyRelevant: 'Reliability', proposedExperiment: 'Inject a failed update and inspect data', estimatedMinutes: 30 }] };
+  const scores = { workRelevance: 2, experimentability: 3, evidencePotential: 3, uniqueness: 1, seriesPotential: 1 };
+  let calls = 0;
+  const provider: LLMProvider = { id: 'mock', name: 'mock', generateText: async () => ({ text: '', model: 'mock' }), generateStructured: async ({ schema }) => { calls++; return schema.parse(calls % 2 ? analysis : scores); } };
+  const source = store.saveSignal({ kind: 'note', text: 'Transactions are atomic', title: 'Test evidence', url: '', tags: [] });
+  const workflow = new RadarWorkflow(store, { analysis: '', score: '' });
+  const first = workflow.start(source.id, provider);
+  assert.equal(workflow.start(source.id, provider).id, first.id);
+  await workflow.waitForIdle();
+  assert.equal(store.radar.listRuns().find(run => run.id === first.id)?.status, 'completed');
+  assert.equal(calls, 2);
+  workflow.start(source.id, provider); await workflow.waitForIdle();
+  assert.equal(calls, 2, 'Completed analysis reused without spending again');
+  const question = store.radar.listQuestions()[0];
+  assert.equal(question.status, 'candidate');
+  const experiment = store.radar.createExperiment(question.id);
+  assert.deepEqual(store.radar.createExperiment(question.id), experiment);
+  const row = store.db.prepare('SELECT prediction,status FROM experiments WHERE id=?').get(experiment.id) as { prediction: string | null; status: string };
+  assert.equal(row.prediction, null); assert.equal(row.status, 'idea');
+  store.radar.overrideScore(question.id, { ...scores, workRelevance: 0 }, 'Outside my research');
+  assert.equal(store.radar.getQuestion(question.id).status, 'backlog');
+  assert.deepEqual(store.radar.getQuestion(question.id).aiScores, scores);
+  assert.equal(store.radar.getQuestion(question.id).overrideReason, 'Outside my research');
+  store.db.exec("CREATE TEMP TRIGGER fail_decision BEFORE INSERT ON decisions BEGIN SELECT RAISE(ABORT,'injected'); END;");
+  assert.throws(() => store.radar.overrideScore(question.id, scores, 'Test rollback'));
+  assert.equal(store.radar.getQuestion(question.id).scores.workRelevance, 0);
+  store.db.exec('DROP TRIGGER fail_decision');
+  const other = store.saveSignal({ kind: 'note', text: 'Transactions are atomic', title: 'Canceled evidence', url: '', tags: [] });
+  const canceled = workflow.start(other.id, provider); workflow.cancel(canceled.id); await workflow.waitForIdle();
+  assert.equal(store.radar.listRuns().find(run => run.id === canceled.id)?.status, 'canceled');
+  assert.equal(calls, 2);
+  const bad: LLMProvider = { ...provider, generateStructured: async () => { throw new Error('private provider details'); } };
+  const failed = workflow.start(other.id, bad); await workflow.waitForIdle();
+  assert.equal(store.radar.listRuns().find(run => run.id === failed.id)?.status, 'failed');
+  assert.equal(store.radar.hasAnalysis(other.id), false);
+  const retry = workflow.start(other.id, provider); await workflow.waitForIdle();
+  assert.equal(store.radar.listRuns().find(run => run.id === retry.id)?.status, 'completed');
+  const urlA = store.saveSignal({ kind: 'url', text: '', title: '', url: 'https://example.com/article?utm_source=a', tags: [] });
+  const urlB = store.saveSignal({ kind: 'url', text: '', title: '', url: 'https://example.com/article', tags: [] });
+  const urlC = store.saveSignal({ kind: 'url', text: '', title: '', url: 'https://example.org/mirror', tags: [] });
+  let fetches = 0;
+  const fetchedWorkflow = new RadarWorkflow(store, { analysis: '', score: '' }, async url => {
+    fetches++;
+    return { normalizedUrl: url.split('?')[0], finalUrl: url, title: 'Evidence', text: 'Transactions are atomic', contentHash: 'same-content-hash' };
+  });
+  const beforeCalls = calls;
+  for (const source of [urlA, urlB, urlC]) {
+    fetchedWorkflow.start(source.id, provider); await fetchedWorkflow.waitForIdle();
+  }
+  assert.equal(fetches, 2, 'Tracking variants reuse cached URL; mirror must be fetched');
+  assert.equal(calls - beforeCalls, 2, 'Content duplicate does not generate additional analysis');
+  assert.equal(store.radar.canonicalSignal(urlB.id), urlA.id);
+  assert.equal(store.radar.canonicalSignal(urlC.id), urlA.id);
+  const atomic = store.saveSignal({ kind: 'note', text: 'Transactions are atomic', title: 'Atomic analysis', url: '', tags: [] });
+  store.db.exec("CREATE TEMP TRIGGER fail_question BEFORE INSERT ON questions BEGIN SELECT RAISE(ABORT,'injected'); END;");
+  const atomicRun = workflow.start(atomic.id, provider); await workflow.waitForIdle();
+  assert.equal(store.radar.listRuns().find(run => run.id === atomicRun.id)?.status, 'failed');
+  assert.equal(store.db.prepare('SELECT id FROM claims WHERE signal_id=?').get(atomic.id), undefined, 'Failed question write rolls back claims');
+  store.db.exec('DROP TRIGGER fail_question');
+  const interrupted = store.radar.startRun(other.id); store.radar.recoverInterruptedRuns();
+  assert.equal(store.radar.listRuns().find(run => run.id === interrupted.id)?.stage, 'interrupted');
+  console.log('Radar integration passed: atomic decisions, duplicate runs, cancellation, failure/retry, interrupted recovery, score overrides and idempotent Idea creation.');
+}

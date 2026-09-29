@@ -1,0 +1,23 @@
+{
+  "name": "@unvar/workflows",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.87.1",
+    "@earendil-works/pi-ai": "0.87.1",
+    "@unvar/db": "workspace:*",
+    "@unvar/decision": "workspace:*",
+    "@unvar/fetcher": "workspace:*",
+    "@unvar/llm": "workspace:*",
+    "@unvar/shared": "workspace:*",
+    "typebox": "1.3.27"
+  }
+}
